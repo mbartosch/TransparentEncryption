@@ -18,6 +18,8 @@ use Digest::SHA1 qw( sha1_base64 );
 
 use Data::Dumper;
 
+# use Smart::Comments;
+
 {
     #my %encryption_key_id : ATTR( :init_arg<ENCRYPTION_KEY_ID>
     #			      :default( '' ) 
@@ -33,11 +35,43 @@ use Data::Dumper;
     my %encoding             : ATTR( :init_arg<ENCODING> 
 				     :default('base64-oneline') );
 
+    my %flag_encrypt_memory  : ATTR( :init_arg<MEMORYENCRYPTION>
+				     :default( 1 ) );
+
+    # possible key management policies:
+    # 'INSTANCE' - one symmetric key per TransparentEncryption instance
+    # 'CERT'     - one symmetric key per asymmetric key
+    # 'YEAR'     - one symmetric key per year
+    # 'MONTH'    - one symmetric key per month
+    # 'WEEK'     - one symmetric key per week
+    # 'DAY'      - one symmetric key per day
+    
+    my %key_management_policy : ATTR( :init_arg<KEYMANAGEMENT>
+				      :default( 'INSTANCE' ) );
+
+
+    # possible rekeying policies:
+    # 'AUTOMATIC' - automatic rekeying
+    # 'MANUAL'    - manual rekeying
+    my %rekeying_policy       : ATTR( :init_arg<REKEYING>
+				      :default( 'AUTOMATIC' ) );
+
+    # no user serviceable parts below
+
     # keeps track of delegate methods for core functions
     my %callback_map         : ATTR;
 
     # emulated database (in-memory only)
     my %dummy_database       : ATTR;
+
+    #my %random_source        : ATTR;
+
+    # instance cipher instance with ephemeral key for in-memory-encryption 
+    # (used to cache symmetric keys)
+    my %instance_cipher_instance : ATTR;
+
+    # this variable holds 
+    my %instance_memory_cache : ATTR;
 
 
     sub START {
@@ -46,7 +80,34 @@ use Data::Dumper;
 	if ($encoding{$ident} !~ m{ \A (?: base64 | base64-oneline | raw) \z }xms) {
 	    confess("Invalid encoding '$encoding{$ident}'");
 	}
-	
+
+	if ($flag_encrypt_memory{$ident} !~ m{ \A (?: 1 | 0) \z }xms) {
+	    confess("Invalid in-memory encryption policy '$flag_encrypt_memory{$ident}'");
+	}
+
+	if ($key_management_policy{$ident} !~ m{ \A (?: INSTANCE | CERT | YEAR | MONTH | WEEK | DAY ) \z }xms) {
+	    confess("Invalid key management policy '$key_management_policy{$ident}'");
+	}
+
+	if ($rekeying_policy{$ident} !~ m{ \A (?: AUTOMATIC | MANUAL ) \z }xms) {
+	    confess("Invalid rekeying policy '$rekeying_policy{$ident}'");
+	}
+
+
+
+	$instance_memory_cache{$ident} = {};
+
+	if ($flag_encrypt_memory{$ident}) {
+	    # set up instance-specific encryption key
+	    
+	    my $symmetric_key = $self->generate_symmetric_key();
+	    # once this instance goes away it invalidates all data 
+	    # encrypted with  this key
+	    $instance_cipher_instance{$ident} = Crypt::CBC->new(
+		-cipher     => $crypt_cbc_class{$ident},
+		-key        => $symmetric_key->{KEY},
+		);
+	}
     }
 
     sub delegate {
@@ -74,7 +135,7 @@ use Data::Dumper;
 	    }
 	    $callback_map{$method} = $arg_ref->{$method};
 	}
-	#print Dumper \%callback_map;
+	### %callback_map;
     }
 
 
@@ -167,7 +228,8 @@ use Data::Dumper;
 
 	$dummy_database{$ident}->{$namespace}->{$key}->{keyid} = $enc_key_id;
 	$dummy_database{$ident}->{$namespace}->{$key}->{value} = $value;
-	
+
+	### database: $dummy_database{$ident}
 	return 1;
     }
 
@@ -251,11 +313,16 @@ use Data::Dumper;
 
 	my $ident = ident $self;
 	my $arg = shift;
+
+	if (ref $arg ne '') {
+	    ### $arg
+	    confess('Invalid data type');
+	}
 	
 	my $sepchar = $separation_character{$ident};
 	my ($encryption_key_id, $data)
 	    = ($arg =~ m{ \A (.*?) $sepchar (.*) \z }xms);
-	
+
 	if (! defined $data) {
 	    confess('Could not extract data from serialized structure');
 	}
@@ -305,6 +372,7 @@ use Data::Dumper;
 	my $arg_ref = shift;
 
 	my $key = $arg_ref->{KEY};
+	### key: $key
 
 	my $data = $arg_ref->{DATA};
 
@@ -349,22 +417,34 @@ use Data::Dumper;
 	my $ident = ident $self;
 	my $arg = shift;
 
+	if (ref $arg ne '') {
+	    confess('Invalid data type');
+	}
+
 	my $deserialized = $self->deserialize_encrypted_data($arg);
 
-	my $encryption_key = $deserialized->{ENCRYPTION_KEY_ID};
+	my $keyid = $deserialized->{ENCRYPTION_KEY_ID};
 	my $data = $deserialized->{DATA};
 
-	if (defined $encryption_key) {
-	    if ($encryption_key =~ m{ \A p7:(.*) }xms ) {
-		my $keyid = $1;
+	my ($type, $id) = ($keyid =~ m{ \A (\S+):(.*) }xms );
+	if (defined $id) {
+	    if ($type eq 'p7') {
 
 		$data = $self->decrypt_asymmetrically(
 		    {
-			KEYID => $keyid,
+			KEYID => $id,
 			DATA  => $self->decode($data),
 		    });
-	    } else {
-	      croak "symmetric decryption not yet implemented";
+	    }
+	    if ($type eq 'salted') {
+		my $key = $self->retrieve_symmetric_key($keyid);
+		### key: $key
+		
+		$data = $self->decrypt_symmetrically(
+		    {
+			KEY  => $key->{KEY},
+			DATA => $self->decode($data),
+		    });
 	    }
 
 	}
@@ -383,10 +463,11 @@ use Data::Dumper;
 
 	my $keyid;
 	if ($mode eq 'symmetric') {
-	    my $encryption_key_id = $self->get_current_symmetric_key_id();
-	    #$keyid = $encryption_key->{KEYID};
-
-	    print "currenty key id: $keyid\n";
+	    my $encryption_key = $self->get_current_symmetric_key();
+	    $keyid  = $encryption_key->{KEYID};
+	    my $key = $encryption_key->{KEY};
+            ### current key: $key
+	    ### keyid: $keyid
 
 	    $value = $self->serialize_encrypted_data(
 		{
@@ -414,6 +495,7 @@ use Data::Dumper;
 	    confess("Invalid encryption mode '$mode'");
 	}
 
+	### transparently encrypted: $value
 	return $value;
     }
 
@@ -426,12 +508,15 @@ use Data::Dumper;
 	my $ident = ident $self;
 	my $arg_ref = shift;
 
-    #    confess('Abstract base class cannot be instantiated');
+        confess('Abstract base class cannot be instantiated');
 	return;
     }
 
 
-    sub get_current_symmetric_key_id {
+    # returns the symmetric key id to use for the next symmetric encryption
+    # if none currently exists or the key management policy prohibits prolonged
+    # use of the existing one create a new key
+    sub get_current_symmetric_key {
 	my $self = shift;
 	# use callback map if a callback exists
 	if (exists $callback_map{GET_CURRENT_SYMMETRIC_KEY_ID}) {
@@ -440,8 +525,67 @@ use Data::Dumper;
 	my $ident = ident $self;
 	my $arg_ref = shift;
 
-    #    confess('Abstract base class cannot be instantiated');
-	return 'FIXME';
+	my $key;
+
+	# FIXME: associate key with symmetric key and consider policy settings
+	my $asymmetric_keyid = $self->get_current_asymmetric_key_id();
+
+	my $data = $self->retrieve_tuple(
+	    {
+		NAMESPACE   => 'sys.datapool.pwsafe',
+		KEY         => 'p7:' . $asymmetric_keyid,
+	    });
+
+	### asymmetric key id: $asymmetric_keyid
+	### found associated symmetric key: $data
+
+	if (! defined $data) {
+	    # no mapping yet for this asymmetric key, create a new key
+	    
+	    $key = $self->generate_symmetric_key();
+	    
+	    # store association in the persistent tuple
+	    $self->store_tuple(
+		{
+		    NAMESPACE         => 'sys.datapool.pwsafe',
+		    KEY               => 'p7:' . $asymmetric_keyid,
+		    VALUE             => 'salted:' . $key->{KEYID},
+		});
+
+	    my $encrypted = $self->encrypt($key->{KEY}, 'asymmetric');
+
+# 	    # encrypt key for asymmetric key
+# 	    my $encrypted = $self->encrypt_asymmetrically(
+# 		{
+# 		    KEYID => $asymmetric_keyid,
+# 		    DATA  => $key->{KEY},
+# 		});
+	    
+# 	    # serialize it
+# 	    my $serialized = $self->serialize_encrypted_data(
+# 		{
+# 		    ENCRYPTION_KEY_ID => $asymmetric_keyid,
+# 		    DATA              => $encrypted,
+# 		});
+	    
+	    # persist data
+	    $self->store_tuple(
+		{
+		    NAMESPACE => 'sys.datapool.keys',
+		    KEY       => 'salted:' . $key->{KEYID},
+		    ENCRYPTION_KEY_ID => 'p7:' . $asymmetric_keyid,
+		    VALUE     => $encrypted,
+		});
+	} else {
+	    # symmetric key already exists, retrieve it
+	    my $keyid = $data->{VALUE};
+	    ### keyid: $keyid
+
+	    # obtain symmetric key from persistent storage
+	    $key = $self->retrieve_symmetric_key($keyid);
+	}
+
+	return $key;
     }
 
     # argument: number of random bytes to get
@@ -459,6 +603,7 @@ use Data::Dumper;
             confess("Invalid parameter (only numbers accepted): $arg");
         }	
 	my $value;
+	# FIXME: also use /dev/random
 	if (-e '/dev/urandom') {
 	    open my $handle, '<', '/dev/urandom';
 	    read $handle, $value, $arg;
@@ -474,6 +619,90 @@ use Data::Dumper;
 	}
 	confess("Could not generate random data");
     }
+
+    sub generate_symmetric_key : PRIVATE {
+	my $self = shift;
+	my $ident = ident $self;
+	my $arg = shift;
+
+	my $key = $self->get_random_bytes(32);
+        ### random key: $key
+	if (length($key) != 32) {
+	    confess("Could not obtain random data for instance encryption key");
+	}
+
+	# convert key into hex string
+	$key = unpack('H*', $key);
+
+	my $keyid = $self->compute_key_id(
+	    {
+		KEY  => $key,
+		LONG => 1,
+	    });
+
+
+	return {
+	    KEY   => $key,
+	    KEYID => $keyid,
+	};
+    }
+
+    sub retrieve_symmetric_key : PRIVATE {
+	my $self = shift;
+	my $ident = ident $self;
+	my $arg = shift;
+
+	# obtain symmetric key
+	my $encrypted_symmetric_key = $self->retrieve_tuple(
+	    {
+		NAMESPACE => 'sys.datapool.keys',
+		KEY       => $arg,
+	    });
+	if (! defined $encrypted_symmetric_key) {
+	    return;
+	}
+	
+	my $symmetric_key = $self->decrypt(
+	    $encrypted_symmetric_key->{VALUE}
+	    );
+
+	### symmetric key: $symmetric_key
+	
+	return {
+	    KEYID => $self->compute_key_id(
+		{
+		    KEY  => $symmetric_key,
+		    LONG => 1,
+		}),
+	    KEY   => $symmetric_key,
+	};
+    }
+
+    sub compute_key_id : PRIVATE {
+	my $self = shift;
+	my $ident = ident $self;
+	my $arg = shift;
+
+	# FIXME: backwards compatibility?
+	# original code:
+#	my $digest = sha1_base64(join(':', 
+#				      $arg->{ALGORITHM}, 
+#				      $arg->{IV},
+#				      $arg->{KEY}));
+
+	my $digest = sha1_base64(join(':', 
+				      $crypt_cbc_class{$ident},
+				      '',
+				      $arg->{KEY}));
+
+	if ($arg->{LONG}) {
+	    return $digest;
+	} else {
+	    return (substr($digest, 0, 8));
+	}
+    }
+
+
 }
 
 1;

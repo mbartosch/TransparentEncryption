@@ -1,4 +1,4 @@
-use Test::More tests => 19;
+use Test::More tests => 23;
 use strict;
 use warnings;
 use File::Temp;
@@ -207,5 +207,5 @@ $encrypted = $tenc->encrypt($test_data, 'symmetric');
 # fully transparent mode with automatic key management
 $encrypted = $tenc->encrypt($test_data);
 ok($encrypted =~ m{ \A .*;base64-oneline; }xms, 'encrypt transparently');
-diag $encrypted;
+# diag $encrypted;
 ok($tenc->decrypt($encrypted) eq $test_data, 'decrypt transparently');
