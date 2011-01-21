@@ -1,12 +1,55 @@
-use Test::More tests => 23;
+use Test::More tests => 25;
 use strict;
 use warnings;
 use File::Temp;
 use Data::Dumper;
-
+use Time::HiRes qw( gettimeofday tv_interval );
+use DBI;
 
 BEGIN { use_ok('OpenXPKI::Crypto::KeyManagement::TransparentEncryption') };
 require_ok('OpenXPKI::Crypto::KeyManagement::TransparentEncryption');
+
+my $dbh = DBI->connect("dbi:SQLite:dbname=00_instantiate.sqlite", "", "");
+
+my $sth = $dbh->prepare(
+    q(
+        CREATE TABLE DATAPOOL(
+            NAMESPACE varchar(255),
+            KEY varchar(255),
+            VALUE varchar(32768),
+            ENCRYPTION_KEY varchar(255))
+    ));
+eval {
+    $sth->execute();
+};
+
+sub store_tuple {
+    my $arg = shift;
+    $dbh->do(q(DELETE FROM DATAPOOL WHERE (NAMESPACE=? AND KEY=?)), undef, $arg->{NAMESPACE}, $arg->{KEY});
+    my $sth = $dbh->prepare(
+	q(
+            INSERT INTO DATAPOOL (namespace, key, value, encryption_key)
+            VALUES (?, ?, ?, ?)
+        ));
+    $sth->execute($arg->{NAMESPACE}, $arg->{KEY}, $arg->{VALUE}, $arg->{ENCRYPTION_KEY});
+}
+
+sub retrieve_tuple {
+    my $arg = shift;
+    my $sth = $dbh->prepare(
+	q(
+            SELECT VALUE, ENCRYPTION_KEY FROM DATAPOOL WHERE (NAMESPACE=? AND KEY=?)
+        ));
+    $sth->execute($arg->{NAMESPACE}, $arg->{KEY});
+    my $row = $sth->fetch();
+    if (! defined $row) {
+	return;
+    }
+    return {
+	VALUE => $row->[0],
+	ENCRYPTION_KEY => $row->[1],
+    };
+}
 
 # list all basenames in directory t/certs/*.pem (only numerical ones)
 sub list_cert_ids {
@@ -14,9 +57,13 @@ sub list_cert_ids {
 }
 
 # get last entry in cert dir
+my $last_cert_id;
 sub get_last_cert_id {
-    my @cert_ids = list_cert_ids();
-    return pop @cert_ids;
+    if (! defined $last_cert_id) {
+	my @cert_ids = list_cert_ids();
+	$last_cert_id = pop @cert_ids;
+    }
+    return $last_cert_id;
 }
 
 sub _encrypt_asymmetrically {
@@ -75,14 +122,21 @@ sub encrypt_asymmetrically {
 }
 
 
-my $tenc = OpenXPKI::Crypto::KeyManagement::TransparentEncryption->new();
+sub transparent_encryption_init {
+    my $tenc = OpenXPKI::Crypto::KeyManagement::TransparentEncryption->new();
 
-$tenc->delegate(
-    {
-	GET_CURRENT_ASYMMETRIC_KEY_ID => \&get_last_cert_id,
-	ENCRYPT_ASYMMETRICALLY        => \&encrypt_asymmetrically,
-	DECRYPT_ASYMMETRICALLY        => \&decrypt_asymmetrically,
-    });
+    $tenc->delegate(
+	{
+	    GET_CURRENT_ASYMMETRIC_KEY_ID => \&get_last_cert_id,
+	    ENCRYPT_ASYMMETRICALLY        => \&encrypt_asymmetrically,
+	    DECRYPT_ASYMMETRICALLY        => \&decrypt_asymmetrically,
+	    STORE_TUPLE                   => \&store_tuple,
+	    RETRIEVE_TUPLE                => \&retrieve_tuple,
+	});
+    return $tenc;
+}
+
+my $tenc = transparent_encryption_init();
 
 my $test_data = 'abc123';
 
@@ -191,21 +245,64 @@ ok(length($tmp) == 250, 'get random bytes');
 
 # now for the interesting stuff
 # force asymmetric encryption of data
-my $encrypted = $tenc->encrypt($test_data, 'asymmetric');
+my $encrypted;
+my $ii;
+my $t0;
+my $elapsed;
+my $persecond;
+my $count;
+
+$count = 100;
+diag("Running $count iterations...");
+$t0 = [gettimeofday];
+for ($ii = 0; $ii < $count; $ii++) {
+    $encrypted = $tenc->encrypt($test_data, 'asymmetric');
+}
+$elapsed   = tv_interval($t0, [gettimeofday]);
+$persecond = $count / $elapsed;
+diag("Elapsed $elapsed seconds. ($persecond per second)");
+
 ok($encrypted =~ m{ \A p7:.*;base64-oneline; }xms, 'encrypt transparently (asymmetrically)');
 
 #diag("encrypted value: $encrypted");
+diag("Running $count iterations...");
+$t0 = [gettimeofday];
+for ($ii = 0; $ii < $count; $ii++) {
+    $tenc->decrypt($encrypted);
+}
+$elapsed   = tv_interval($t0, [gettimeofday]);
+$persecond = $count / $elapsed;
+diag("Elapsed $elapsed seconds. ($persecond per second)");
+
 ok($tenc->decrypt($encrypted) eq $test_data, 'decrypt transparently');
 
 # force symmetric encryption of data
 $encrypted = $tenc->encrypt($test_data, 'symmetric');
-#ok($encrypted =~ m{ \A .*;base64-oneline; }xms, 'encrypt transparently (force asymmetric encryption)');
+ok($encrypted =~ m{ \A salted:.*;base64-oneline; }xms, 'encrypt transparently (force symmetric encryption)');
 #diag("encrypted value: $encrypted");
-#die;
-#ok($tenc->decrypt($encrypted) eq $test_data, 'decrypt transparently');
+ok($tenc->decrypt($encrypted) eq $test_data, 'decrypt transparently');
 
 # fully transparent mode with automatic key management
-$encrypted = $tenc->encrypt($test_data);
-ok($encrypted =~ m{ \A .*;base64-oneline; }xms, 'encrypt transparently');
-# diag $encrypted;
+$count = 1000;
+$t0 = [gettimeofday];
+for ($ii = 0; $ii < $count; $ii++) {
+    $encrypted = $tenc->encrypt($test_data);
+}
+$elapsed   = tv_interval($t0, [gettimeofday]);
+$persecond = $count / $elapsed;
+diag("Elapsed $elapsed seconds. ($persecond per second)");
+
+ok($encrypted =~ m{ \A salted:.*;base64-oneline; }xms, 'encrypt transparently');
+#diag $encrypted;
+
+$tenc = transparent_encryption_init();
+
 ok($tenc->decrypt($encrypted) eq $test_data, 'decrypt transparently');
+$t0 = [gettimeofday];
+for ($ii = 0; $ii < $count; $ii++) {
+    $tenc->decrypt($encrypted);
+}
+$elapsed   = tv_interval($t0, [gettimeofday]);
+$persecond = $count / $elapsed;
+diag("Elapsed $elapsed seconds. ($persecond per second)");
+

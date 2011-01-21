@@ -230,6 +230,7 @@ use Data::Dumper;
 	$dummy_database{$ident}->{$namespace}->{$key}->{value} = $value;
 
 	### database: $dummy_database{$ident}
+	print Dumper $dummy_database{$ident};
 	return 1;
     }
 
@@ -437,7 +438,7 @@ use Data::Dumper;
 		    });
 	    }
 	    if ($type eq 'salted') {
-		my $key = $self->retrieve_symmetric_key($keyid);
+		my $key = $self->retrieve_symmetric_key($id);
 		### key: $key
 		
 		$data = $self->decrypt_symmetrically(
@@ -499,6 +500,15 @@ use Data::Dumper;
 	return $value;
     }
 
+    sub rekey {
+	my $self = shift;
+	my $ident = ident $self;
+	my $arg = shift;
+
+	confess('Rekeying not yet implemented');
+    }
+
+
     sub get_current_asymmetric_key_id {
 	my $self = shift;
 	# use callback map if a callback exists
@@ -549,33 +559,23 @@ use Data::Dumper;
 		{
 		    NAMESPACE         => 'sys.datapool.pwsafe',
 		    KEY               => 'p7:' . $asymmetric_keyid,
-		    VALUE             => 'salted:' . $key->{KEYID},
+		    VALUE             => $key->{KEYID},
 		});
 
 	    my $encrypted = $self->encrypt($key->{KEY}, 'asymmetric');
 
-# 	    # encrypt key for asymmetric key
-# 	    my $encrypted = $self->encrypt_asymmetrically(
-# 		{
-# 		    KEYID => $asymmetric_keyid,
-# 		    DATA  => $key->{KEY},
-# 		});
-	    
-# 	    # serialize it
-# 	    my $serialized = $self->serialize_encrypted_data(
-# 		{
-# 		    ENCRYPTION_KEY_ID => $asymmetric_keyid,
-# 		    DATA              => $encrypted,
-# 		});
-	    
 	    # persist data
 	    $self->store_tuple(
 		{
 		    NAMESPACE => 'sys.datapool.keys',
-		    KEY       => 'salted:' . $key->{KEYID},
+		    KEY       => $key->{KEYID},
 		    ENCRYPTION_KEY_ID => 'p7:' . $asymmetric_keyid,
 		    VALUE     => $encrypted,
 		});
+
+	    # cache key in class instance
+	    $self->cache_key($key);
+
 	} else {
 	    # symmetric key already exists, retrieve it
 	    my $keyid = $data->{VALUE};
@@ -650,13 +650,28 @@ use Data::Dumper;
     sub retrieve_symmetric_key : PRIVATE {
 	my $self = shift;
 	my $ident = ident $self;
-	my $arg = shift;
+	my $keyid = shift;
 
 	# obtain symmetric key
+	# check if it is already cached
+	my $key;
+	if (exists $instance_memory_cache{$ident}->{key}->{$keyid}) {
+	    my $tmp = $instance_memory_cache{$ident}->{key}->{$keyid};
+	    if (defined $instance_cipher_instance{$ident}) {
+		$tmp = $instance_cipher_instance{$ident}->decrypt($tmp);
+	    }
+	    $key = {
+		KEYID => $keyid,
+		KEY   => $tmp,
+	    };
+	    return $key;
+	}
+	
+	# get it from the encrypted store
 	my $encrypted_symmetric_key = $self->retrieve_tuple(
 	    {
 		NAMESPACE => 'sys.datapool.keys',
-		KEY       => $arg,
+		KEY       => $keyid,
 	    });
 	if (! defined $encrypted_symmetric_key) {
 	    return;
@@ -668,7 +683,7 @@ use Data::Dumper;
 
 	### symmetric key: $symmetric_key
 	
-	return {
+	$key = {
 	    KEYID => $self->compute_key_id(
 		{
 		    KEY  => $symmetric_key,
@@ -676,6 +691,9 @@ use Data::Dumper;
 		}),
 	    KEY   => $symmetric_key,
 	};
+
+	$self->cache_key($key);
+	return $key;
     }
 
     sub compute_key_id : PRIVATE {
@@ -702,7 +720,21 @@ use Data::Dumper;
 	}
     }
 
+    sub cache_key : PRIVATE {
+	my $self = shift;
+	my $ident = ident $self;
+	my $arg = shift;
 
+	my $key = $arg->{KEY};
+	if (defined $instance_cipher_instance{$ident}) {
+	    $key = $instance_cipher_instance{$ident}->encrypt($key);
+	}
+
+	my $keyid = $arg->{KEYID};
+	$instance_memory_cache{$ident}->{key}->{$keyid} = $key;
+#	print Dumper $instance_memory_cache{$ident};
+	return 1;
+    }
 }
 
 1;
@@ -742,6 +774,9 @@ Transparently encrypts the passed data.
 
 Transparently decrypts the argument.
 
+=head2 rekey()
+
+Perform a rekeying procedure on the stored data.
 
 =head1 Internal methods
 
