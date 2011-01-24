@@ -223,10 +223,8 @@ use Data::Dumper;
 
 	my $namespace  = $arg_ref->{NAMESPACE};
 	my $key        = $arg_ref->{KEY};
-	my $enc_key_id = $arg_ref->{ENCRYPTION_KEY_ID};
 	my $value      = $arg_ref->{VALUE};
 
-	$dummy_database{$ident}->{$namespace}->{$key}->{keyid} = $enc_key_id;
 	$dummy_database{$ident}->{$namespace}->{$key}->{value} = $value;
 
 	### database: $dummy_database{$ident}
@@ -251,11 +249,9 @@ use Data::Dumper;
 	    return;
 	}
 	
-	my $keyid = $dummy_database{$ident}->{$namespace}->{$key}->{keyid} || '';
 	my $value = $dummy_database{$ident}->{$namespace}->{$key}->{value};
 
 	return {
-	    ENCRYPTION_KEY_ID => $keyid,
 	    VALUE             => $value,
 	}
     }
@@ -569,7 +565,6 @@ use Data::Dumper;
 		{
 		    NAMESPACE => 'sys.datapool.keys',
 		    KEY       => $key->{KEYID},
-		    ENCRYPTION_KEY_ID => 'p7:' . $asymmetric_keyid,
 		    VALUE     => $encrypted,
 		});
 
