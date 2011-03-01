@@ -16,9 +16,8 @@ my $sth = $dbh->prepare(
         CREATE TABLE DATAPOOL(
             NAMESPACE varchar(255),
             KEY varchar(255),
-            VALUE varchar(32768),
-            ENCRYPTION_KEY varchar(255))
-    ));
+            VALUE varchar(32768)
+    )));
 eval {
     $sth->execute();
 };
@@ -28,17 +27,17 @@ sub store_tuple {
     $dbh->do(q(DELETE FROM DATAPOOL WHERE (NAMESPACE=? AND KEY=?)), undef, $arg->{NAMESPACE}, $arg->{KEY});
     my $sth = $dbh->prepare(
 	q(
-            INSERT INTO DATAPOOL (namespace, key, value, encryption_key)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO DATAPOOL (namespace, key, value)
+            VALUES (?, ?, ?)
         ));
-    $sth->execute($arg->{NAMESPACE}, $arg->{KEY}, $arg->{VALUE}, $arg->{ENCRYPTION_KEY});
+    $sth->execute($arg->{NAMESPACE}, $arg->{KEY}, $arg->{VALUE});
 }
 
 sub retrieve_tuple {
     my $arg = shift;
     my $sth = $dbh->prepare(
 	q(
-            SELECT VALUE, ENCRYPTION_KEY FROM DATAPOOL WHERE (NAMESPACE=? AND KEY=?)
+            SELECT VALUE FROM DATAPOOL WHERE (NAMESPACE=? AND KEY=?)
         ));
     $sth->execute($arg->{NAMESPACE}, $arg->{KEY});
     my $row = $sth->fetch();
@@ -47,7 +46,6 @@ sub retrieve_tuple {
     }
     return {
 	VALUE => $row->[0],
-	ENCRYPTION_KEY => $row->[1],
     };
 }
 
