@@ -45,9 +45,8 @@ use Data::Dumper;
     # 'MONTH'    - one symmetric key per month
     # 'WEEK'     - one symmetric key per week
     # 'DAY'      - one symmetric key per day
-    
     my %key_management_policy : ATTR( :init_arg<KEYMANAGEMENT>
-				      :default( 'INSTANCE' ) );
+				      :default( 'CERT' ) );
 
 
     # possible rekeying policies:
@@ -55,6 +54,14 @@ use Data::Dumper;
     # 'MANUAL'    - manual rekeying
     my %rekeying_policy       : ATTR( :init_arg<REKEYING>
 				      :default( 'AUTOMATIC' ) );
+
+    # storage namespace for symmetric key persistence
+    my %namespace_key_storage : ATTR( :init_arg<NAMESPACE_KEY_STORAGE>
+				      :default( 'sys.datapool.key.storage' ) );
+
+    # storage namespace for key association
+    my %namespace_key_mapping : ATTR( :init_arg<NAMESPACE_KEY_MAPPING>
+				      :default( 'sys.datapool.key.mapping' ) );
 
     # no user serviceable parts below
 
@@ -134,6 +141,11 @@ use Data::Dumper;
 		confess("Invalid delegate method type for method '$method'");
 	    }
 	    $callback_map{$method} = $arg_ref->{$method};
+	
+	}
+	if (! exists $callback_map{STORE_TUPLE} 
+	    || ! exists $callback_map{RETRIEVE_TUPLE}) {
+	    warn "WARNING: Running in demo mode (without persistent storage). Encrypted data will not be recoverable. Specify STORE_TUPLE and RETRIEVE_TUPLE methods in order to get rid of this warning.";
 	}
 	### %callback_map;
     }
@@ -256,29 +268,6 @@ use Data::Dumper;
 	}
     }
 
-#     sub store_key {
-# 	my $self = shift;
-# 	# use callback map if a callback exists
-# 	if (exists $callback_map{STORE_KEY}) {
-# 	    return $callback_map{STORE_KEY}(@_);
-# 	}
-
-# 	my $ident = ident $self;
-# 	my $arg_ref = shift;
-
-
-#     }
-
-#     sub retrieve_key {
-# 	my $self = shift;
-# 	# use callback map if a callback exists
-# 	if (exists $callback_map{RETRIEVE_KEY}) {
-# 	    return $callback_map{RETRIEVE_KEY}(@_);
-# 	}
-
-#     }
-
-    
     sub serialize_encrypted_data {
 	my $self = shift;
 	# use callback map if a callback exists
@@ -390,7 +379,7 @@ use Data::Dumper;
 	my $ident = ident $self;
 	my $arg_ref = shift;
 
-	confess('Abstract class method');
+	confess('ERROR: Cannot proceed without a means to asymmetrically encrypt data. Please implement and specify an ENCRYPT_ASYMMETRICALLY method.');
 	return;
     }
 
@@ -403,7 +392,7 @@ use Data::Dumper;
 	my $ident = ident $self;
 	my $arg_ref = shift;
 
-	confess('Abstract class method');
+	confess('ERROR: Cannot proceed without a means to asymmetrically decrypt data. Please implement and specify a DECRYPT_ASYMMETRICALLY method.');
 	return;
     }
 
@@ -514,7 +503,7 @@ use Data::Dumper;
 	my $ident = ident $self;
 	my $arg_ref = shift;
 
-        confess('Abstract base class cannot be instantiated');
+	confess('ERROR: Cannot proceed without a means to determine the current asymmetric key id. Please implement and specify a GET_CURENT_ASYMMETRIC_KEY_ID method.');
 	return;
     }
 
@@ -538,7 +527,7 @@ use Data::Dumper;
 
 	my $data = $self->retrieve_tuple(
 	    {
-		NAMESPACE   => 'sys.datapool.pwsafe',
+		NAMESPACE   => $namespace_key_mapping{$ident},
 		KEY         => 'p7:' . $asymmetric_keyid,
 	    });
 
@@ -553,7 +542,7 @@ use Data::Dumper;
 	    # store association in the persistent tuple
 	    $self->store_tuple(
 		{
-		    NAMESPACE         => 'sys.datapool.pwsafe',
+		    NAMESPACE         => $namespace_key_mapping{$ident},
 		    KEY               => 'p7:' . $asymmetric_keyid,
 		    VALUE             => $key->{KEYID},
 		});
@@ -563,7 +552,7 @@ use Data::Dumper;
 	    # persist data
 	    $self->store_tuple(
 		{
-		    NAMESPACE => 'sys.datapool.keys',
+		    NAMESPACE => $namespace_key_storage{$ident},
 		    KEY       => $key->{KEYID},
 		    VALUE     => $encrypted,
 		});
@@ -665,7 +654,7 @@ use Data::Dumper;
 	# get it from the encrypted store
 	my $encrypted_symmetric_key = $self->retrieve_tuple(
 	    {
-		NAMESPACE => 'sys.datapool.keys',
+		NAMESPACE => $namespace_key_storage{$ident},
 		KEY       => $keyid,
 	    });
 	if (! defined $encrypted_symmetric_key) {
