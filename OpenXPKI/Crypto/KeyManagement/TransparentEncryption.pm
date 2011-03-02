@@ -15,6 +15,7 @@ use English;
 use MIME::Base64;
 use Crypt::CBC;
 use Digest::SHA1 qw( sha1_base64 );
+use DateTime;
 
 use Data::Dumper;
 
@@ -40,20 +41,15 @@ use Data::Dumper;
 
     # possible key management policies:
     # 'INSTANCE' - one symmetric key per TransparentEncryption instance
-    # 'CERT'     - one symmetric key per asymmetric key
+    # 'CERT'     - one symmetric key per certificate/asymmetric key
     # 'YEAR'     - one symmetric key per year
+    # 'QUARTER'  - one symmetric key per quarter
     # 'MONTH'    - one symmetric key per month
     # 'WEEK'     - one symmetric key per week
     # 'DAY'      - one symmetric key per day
     my %key_management_policy : ATTR( :init_arg<KEYMANAGEMENT>
 				      :default( 'CERT' ) );
 
-
-    # possible rekeying policies:
-    # 'AUTOMATIC' - automatic rekeying
-    # 'MANUAL'    - manual rekeying
-    my %rekeying_policy       : ATTR( :init_arg<REKEYING>
-				      :default( 'AUTOMATIC' ) );
 
     # storage namespace for symmetric key persistence
     my %namespace_key_storage : ATTR( :init_arg<NAMESPACE_KEY_STORAGE>
@@ -77,6 +73,9 @@ use Data::Dumper;
     # (used to cache symmetric keys)
     my %instance_cipher_instance : ATTR;
 
+    # unique instance id
+    my %instance_id              : ATTR;
+
     # this variable holds 
     my %instance_memory_cache : ATTR;
 
@@ -92,17 +91,17 @@ use Data::Dumper;
 	    confess("Invalid in-memory encryption policy '$flag_encrypt_memory{$ident}'");
 	}
 
-	if ($key_management_policy{$ident} !~ m{ \A (?: INSTANCE | CERT | YEAR | MONTH | WEEK | DAY ) \z }xms) {
+	if ($key_management_policy{$ident} 
+	    !~ m{ \A (?: INSTANCE | CERT 
+                         | YEAR | QUARTER | MONTH | WEEK | DAY ) \z }xms) {
 	    confess("Invalid key management policy '$key_management_policy{$ident}'");
 	}
 
-	if ($rekeying_policy{$ident} !~ m{ \A (?: AUTOMATIC | MANUAL ) \z }xms) {
-	    confess("Invalid rekeying policy '$rekeying_policy{$ident}'");
-	}
-
-
-
 	$instance_memory_cache{$ident} = {};
+
+	# the instance id is a public random string that identifies 
+	# this particular class instance 
+	$instance_id{$ident} = sha1_base64($self->get_random_bytes(20));
 
 	if ($flag_encrypt_memory{$ident}) {
 	    # set up instance-specific encryption key
@@ -485,15 +484,6 @@ use Data::Dumper;
 	return $value;
     }
 
-    sub rekey {
-	my $self = shift;
-	my $ident = ident $self;
-	my $arg = shift;
-
-	confess('Rekeying not yet implemented');
-    }
-
-
     sub get_current_asymmetric_key_id {
 	my $self = shift;
 	# use callback map if a callback exists
@@ -520,20 +510,44 @@ use Data::Dumper;
 	my $ident = ident $self;
 	my $arg_ref = shift;
 
-	my $key;
+	# policy setting (how often should we generate new symmetric keys)
+	my $policy = $key_management_policy{$ident};
 
-	# FIXME: associate key with symmetric key and consider policy settings
-	my $asymmetric_keyid = $self->get_current_asymmetric_key_id();
+	my $key_handle;
+	if ($policy eq 'CERT') {
+	    # latest asymmetric key available
+	    my $asymmetric_keyid = $self->get_current_asymmetric_key_id();
+
+	    $key_handle = 'p7:' . $asymmetric_keyid;
+	} elsif ($policy eq 'INSTANCE') {
+	    $key_handle = 'i:' . $instance_id{$ident};
+	} elsif ($policy eq 'YEAR') {
+	    my $now = DateTime->now();
+	    $key_handle = 'd:' . $now->year();
+	} elsif ($policy eq 'QUARTER') {
+	    my $now = DateTime->now();
+	    $key_handle = 'd:' . $now->year() . 'Q' . $now->quarter();
+	} elsif ($policy eq 'MONTH') {
+	    my $now = DateTime->now();
+	    $key_handle = 'd:' . substr($now->ymd(''), 0, 6);
+	} elsif ($policy eq 'WEEK') {
+	    my $now = DateTime->now();
+	    $key_handle = 'd:' . $now->year() . '.' . $now->week();
+	} elsif ($policy eq 'DAY') {
+	    my $now = DateTime->now();
+	    $key_handle = 'd:' . $now->ymd('');
+	}
 
 	my $data = $self->retrieve_tuple(
 	    {
 		NAMESPACE   => $namespace_key_mapping{$ident},
-		KEY         => 'p7:' . $asymmetric_keyid,
+		KEY         => $key_handle,
 	    });
 
-	### asymmetric key id: $asymmetric_keyid
+	### key handle: $key_handle
 	### found associated symmetric key: $data
 
+	my $key;
 	if (! defined $data) {
 	    # no mapping yet for this asymmetric key, create a new key
 	    
@@ -543,7 +557,7 @@ use Data::Dumper;
 	    $self->store_tuple(
 		{
 		    NAMESPACE         => $namespace_key_mapping{$ident},
-		    KEY               => 'p7:' . $asymmetric_keyid,
+		    KEY               => $key_handle,
 		    VALUE             => $key->{KEYID},
 		});
 
@@ -734,13 +748,6 @@ This class implements a key management solution
 
 =head2 Features
 
-=head3 Rekeying
-
-=head4 Manual rekeying
-
-=head4 Automatic rekeying
-
-
 
 =head1 Methods
 
@@ -758,9 +765,6 @@ Transparently encrypts the passed data.
 
 Transparently decrypts the argument.
 
-=head2 rekey()
-
-Perform a rekeying procedure on the stored data.
 
 =head1 Internal methods
 

@@ -121,7 +121,11 @@ sub encrypt_asymmetrically {
 
 
 sub transparent_encryption_init {
-    my $tenc = OpenXPKI::Crypto::KeyManagement::TransparentEncryption->new();
+    my $tenc = OpenXPKI::Crypto::KeyManagement::TransparentEncryption->new(
+	{
+	    KEYMANAGEMENT => 'DAY',
+	}
+	);
 
     $tenc->delegate(
 	{
