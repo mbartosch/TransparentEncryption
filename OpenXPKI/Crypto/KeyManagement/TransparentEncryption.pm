@@ -1,7 +1,7 @@
 ## OpenXPKI::Crypto::KeyManagement::TransparentEncryption
 ##
-## Written 2010 by Martin Bartosch for the OpenXPKI project
-## Copyright (C) 2010 by The OpenXPKI Project
+## Written 2011 by Martin Bartosch for the OpenXPKI project
+## Copyright (C) 2010, 2011 by The OpenXPKI Project
 ##
 
 package OpenXPKI::Crypto::KeyManagement::TransparentEncryption;
