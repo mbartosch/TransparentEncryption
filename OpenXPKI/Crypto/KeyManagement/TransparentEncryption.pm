@@ -22,9 +22,6 @@ use Data::Dumper;
 # use Smart::Comments;
 
 {
-    #my %encryption_key_id : ATTR( :init_arg<ENCRYPTION_KEY_ID>
-    #			      :default( '' ) 
-    #			      :get<encryption_key_id> );
     my %separation_character : ATTR( :init_arg<SEPARATION_CHARACTER>
 				     :default( ';' )
 				     :get<separation_character> );
@@ -34,10 +31,12 @@ use Data::Dumper;
 				     :get<crypt_cbc_class> );
 
     my %encoding             : ATTR( :init_arg<ENCODING> 
-				     :default('base64-oneline') );
+				     :default('base64-oneline')
+				     :get<encoding> );
 
     my %flag_encrypt_memory  : ATTR( :init_arg<MEMORYENCRYPTION>
-				     :default( 1 ) );
+				     :default( 1 )
+				     :get<memoryencryption> );
 
     # possible key management policies:
     # 'INSTANCE' - one symmetric key per TransparentEncryption instance
@@ -48,26 +47,27 @@ use Data::Dumper;
     # 'WEEK'     - one symmetric key per week
     # 'DAY'      - one symmetric key per day
     my %key_management_policy : ATTR( :init_arg<KEYMANAGEMENT>
-				      :default( 'CERT' ) );
+				      :default( 'CERT' )
+				      :get<key_management> );
 
 
     # storage namespace for symmetric key persistence
     my %namespace_key_storage : ATTR( :init_arg<NAMESPACE_KEY_STORAGE>
-				      :default( 'sys.datapool.key.storage' ) );
+				      :default( 'sys.datapool.key.storage' )
+				      :get<namespace_key_storage> );
 
     # storage namespace for key association
     my %namespace_key_mapping : ATTR( :init_arg<NAMESPACE_KEY_MAPPING>
-				      :default( 'sys.datapool.key.mapping' ) );
+				      :default( 'sys.datapool.key.mapping' )
+				      :get<namespace_key_mapping> );
 
     # no user serviceable parts below
 
     # keeps track of delegate methods for core functions
-    my %callback_map         : ATTR;
+    my %callback_map             : ATTR;
 
     # emulated database (in-memory only)
-    my %dummy_database       : ATTR;
-
-    #my %random_source        : ATTR;
+    my %dummy_database           : ATTR;
 
     # instance cipher instance with ephemeral key for in-memory-encryption 
     # (used to cache symmetric keys)
@@ -77,7 +77,7 @@ use Data::Dumper;
     my %instance_id              : ATTR;
 
     # this variable holds 
-    my %instance_memory_cache : ATTR;
+    my %instance_memory_cache    : ATTR;
 
 
     sub START {
@@ -594,7 +594,7 @@ use Data::Dumper;
             confess("Invalid parameter (only numbers accepted): $arg");
         }	
 	my $value;
-	# FIXME: also use /dev/random
+	# FIXME: also use /dev/random?
 	if (-e '/dev/urandom') {
 	    open my $handle, '<', '/dev/urandom';
 	    read $handle, $value, $arg;
@@ -721,7 +721,6 @@ use Data::Dumper;
 
 	my $keyid = $arg->{KEYID};
 	$instance_memory_cache{$ident}->{key}->{$keyid} = $key;
-#	print Dumper $instance_memory_cache{$ident};
 	return 1;
     }
 }
@@ -735,26 +734,392 @@ OpenXPKI::Crypto::KeyManagement::TransparentEncryption
 
 =head1 Description
 
-This class implements a key management solution
+This class implements a key management solution that allows to transparently
+encrypt and decrypt arbitrary data. Seen from a user perspective,
+encrypt() and decrypt() are the only interfaces to the class. And these
+methods only require one single argument, the plaintext or ciphertext,
+respectively.
 
-=head2 Features
+Behind the scenes, TransparentEncryption automatically generates or
+reinstantiates symmetric keys that are used for the actual encryption.
+It also takes care of regularly creating new keys in order to avoid
+excessive use of one single key which is never exchanged over time.
+
+To make that possible, TransparentEncryption requires a persistent 
+store which is used to store encrypted keys and key association metadata.
+
+Ultimately, all symmetric keys are encrypted using asymmetric encryption.
+Newly created symmetric keys are asymmetrically encrypted to the currently
+used asymmetric key. In order to reinstantiate an archived symmetric key,
+TransparentEncryption uses the asymmetric key to decrypt the value pulled
+from the persistent store.
+
+If a class instance has read access to the underlying key storage which
+was used when the encrypted input data was originally encrypted, and
+can access the asymmetric keys used for protecting the symmetric keys, it 
+can decrypt any data previously encrypted.
+
+
+=head2 Design goals
+
+=over
+
+=item * Simplicity
+
+Limit the primary user interface to encrypt() and decrypt() which do their 
+magic behind the scenes.
+
+=item * Automatic key management
+
+A symmetric key is used for encryption only for a certain period. 
+After this period has passed, a new symmetric key is generated 
+(while still allowing older encrypted data to be decrypted using the 
+old keys).
+
+Generation and retrieval of symmetric keys is handled by this 
+key management class fully automatically.
+
+=item * Speed
+
+Encryption/decryption uses symmetric keys for high throughput. 
+
+=item * Key caching
+
+The class caches symmetric keys in memory throughout the lifetime of
+an instance once they have been used.
+
+=item * In memory encryption
+
+Keys stored in memory are encrypted using a instance-specific 
+ephemeral key (memory encryption can be disabled in order to gain 
+performance benefits).
+
+=item * Abstraction and versatility
+
+The class itself is highly abstract, it allows (and requires) a user
+to implement most underlying methods, most importantly the mechanisms
+for encrypting a string for a public key, to decrypt an encrypted string
+and to get the currently used asymmetric key id.
+
+=item * Backwards compatibility
+
+Encrypted data generated by older versions of the OpenXPKI Datapool 
+implementation can be decrypted (this class was intended as a replacement 
+for the old 'inline' implementation). 
+
+In particular, encrypt() always
+writes data in the new serialization format, whereas decrypt() can both
+handle the old and the new format.
+
+=back
 
 
 =head1 Methods
 
 =head2 new()
 
+Constructor, returns a new class instance. Accepts the following named
+parameters:
+
+=over
+
+=item * MEMORYENCRYPTION
+
+Flag that determines if caches symmetric keys are stored encrypted in memory.
+Allowed values: '0', '1'. Default: '1'
+
+=item * KEYMANAGEMENT
+
+This setting determines how often a new symmetric key is generated. 
+Effectively this setting limits the time a symmetric key is used, automatically
+rolling over to a new one whenever necessary.
+
+Default: 'CERT'
+
+Allowed values:
+
+=over
+
+=item * 'INSTANCE'
+
+one symmetric key per TransparentEncryption instance
+
+=item *  'CERT'
+
+one symmetric key per certificate/asymmetric key
+
+=item * 'YEAR'
+
+one symmetric key per year
+
+=item * 'QUARTER'
+
+one symmetric key per quarter
+
+=item * 'MONTH'
+
+one symmetric key per month
+
+=item * 'WEEK'
+
+one symmetric key per week
+
+=item * 'DAY'
+
+one symmetric key per day
+
+=back
+
+Behind the scenes the class computes a "key period identifier" which
+is a string that changes whenever the underlying time period is over.
+E. g. if set to 'MONTH' the class computes a key period identifier of
+the format YYYYMM which is used to reference the corresponding symmetric key.
+Whenever the class tries to obtain a symmetric key for encryption, it first
+looks in the database if there is already an existing one for the specified
+key period identifier. If there is none, a new key is computed, encrypted
+and stored in the database. In addition the corresponding mapping between
+key period identifier and key id is stored in the database.
+
+=item * NAMESPACE_KEY_STORAGE
+
+Persistent storage namespace to use for storing encrypted symmetric keys.
+Default: 'sys.datapool.key.storage'
+
+=item * NAMESPACE_KEY_MAPPING
+
+Persistent storage namespace to use for storing mapping information from
+key period identifier to symmetric key id.
+Default: 'sys.datapool.key.mapping'
+
+=item * ENCODING
+
+Encoding mechanism. Allowed values: 'base64', 'base64-oneline', 'raw'. 
+Default: 'base64-oneline'
+
+=item * SEPARATION_CHARACTER
+
+Character used to separate fields in serialized output. Default: ';'
+
+=item * CRYPT_CBC_CLASS
+
+CBC class used for symmetric encryption. Default: 'Crypt::OpenSSL::AES'
+
+=back
+
+
 =head2 delegate()
 
-Set delegate (callback) methods for base operations.
+Set delegate (callback) methods for base operations. After instantiating
+the class instance with new() the caller must at least delegate the mandatory
+methods via this call.
+
+The following delegate method ids are available:
+
+=over
+
+=item * ENCRYPT_ASYMMETRICALLY (mandatory)
+
+The custom function should accept two mandatory named parameters, 'KEYID' 
+and 'DATA'.
+DATA is the clear text to be encrypted (may be binary data). KEYID is a 
+symbolic reference that uniquely identifies the asymmetric key to use. 
+
+KEYIDs must be consistent throughout the use of this class, but 
+otherwise can have arbitrary semantics.
+
+The function should return the encrypted value (may be binary data).
+
+On error the function should throw an exception (or die) instead of returning
+an undef.
+
+=item * DECRYPT_ASYMMETRICALLY (mandatory)
+
+The custom function should accept two mandatory named parameters, 'KEYID' 
+and 'DATA'.
+DATA is the cipher text to be decrypted (may be binary data). KEYID is a 
+symbolic reference that uniquely identifies the asymmetric key that was used
+for encrypting the data. 
+
+KEYIDs must be consistent throughout the use of this class, but 
+otherwise can have arbitrary semantics.
+
+The function should return the decrypted value (may be binary data).
+
+On error the function should throw an exception (or die) instead of returning
+an undef.
+
+=item * GET_CURRENT_ASYMMETRIC_KEY_ID (mandatory)
+
+This function should return the KEYID of the asymmetric key that 
+should currently be used for new asymmetric encryption operations.
+
+The function does not accept any input parameters.
+
+On error the function should throw an exception (or die) instead of returning
+an undef.
+
+=item * STORE_TUPLE (strongly recommended)
+
+This custom function should accept three named parameters, 'NAMESPACE',
+'KEY' and 'VALUE'. 
+
+Its purpose is to persistently store the content of 'VALUE' indexed by
+a key formed by 'NAMESPACE' and 'KEY'. Within 'NAMESPACE' values indexed
+by 'KEY' are unique. If an existing ('NAMESPACE', 'KEY') selector is
+specified, the function should overwrite the existing value.
+
+'NAMESPACE' and 'KEY' are printable strings. 'VALUE' is normally a printable
+string (unless 'raw' encoding is chosen during initialization, in which
+case this function may either silently process the data or die with an error).
+
+If this function is not implemented, encrypted values can only be decrypted
+by the same instance of the class. Once the class instance dies, encrypted
+values are lost forever. The class prints a warning if this method is not
+implemented.
+
+On error the function should throw an exception (or die) instead of returning
+an undef.
+
+=item * RETRIEVE_TUPLE (strongly recommended)
+
+This custom function should accept two named parameters, 'NAMESPACE' and
+'KEY'.
+
+Its purpose is to retrieve and return the stored value indexed by a 
+key formed by  'NAMESPACE' and 'KEY'. 
+If no value exists, it should return undef.
+
+'NAMESPACE' and 'KEY' are printable strings.
+
+On error the function should throw an exception (or die) instead of returning
+an undef.
+
+=item * SERIALIZE_ENCRYPTED_DATA
+
+The custom function should accept two mandatory named parameters, 
+'ENCRYPTION_KEY_ID' and 'DATA'.
+
+It returns a string containing a serialized representation of the supplied
+parameters.
+
+On error the function should throw an exception (or die) instead of returning
+an undef.
+
+=item * DESERIALIZE_ENCRYPTED_DATA
+
+The custom function should accept one literal parameter containing the 
+serialized string to deserialize. See SERIALIZE_ENCRYPTED_DATA.
+
+It returns a hash ref containing the deserialized values.
+The keys of the hash ref returned are 'ENCRYPTION_KEY_ID' and 'DATA'.
+
+On error the function should throw an exception (or die) instead of returning
+an undef.
+
+=item * GET_RANDOM_BYTES
+
+The custom function should accept one literal parameter (integer). The
+argument specifies the number of random bytes to generate. The function
+should compute the specified amount of cryptographically secure random
+data and return it as a scalar (binary data).
+
+On error the function should throw an exception (or die) instead of returning
+an undef.
+
+=back
 
 =head2 encrypt()
 
-Transparently encrypts the passed data.
+Transparently encrypts the passed data. Returns the serialized representation
+of the encryption result. Input may be arbitrary binary data.
+
+If a second argument is supplied, it influences the encryption mechanism.
+Possible values for the second argument is 'symmetric' default and 
+'asymmetric'. If 'asymmetric' is supplied, the method encrypts the passed
+value asymmetrically. The main disadvantage is a much lower speed compared
+to the 'symmetric' encryption.
+
+Unless internal encoding is set to 'raw' the returned value will be 
+a printable string.
 
 =head2 decrypt()
 
-Transparently decrypts the argument.
+Transparently decrypts the argument. Return value may be binary data.
+
+=head2 can_decrypt()
+
+Returns true if the class can decrypt the encrypted value passed to the
+method.
+
+=head1 Examples
+
+    sub get_last_cert_id { 
+        ...
+        return $cert_id;
+    }
+
+    sub encrypt_asymmetrically() {
+        my $arg_ref = shift;
+
+        my $keyid = $arg_ref->{KEYID};
+        my $data  = $arg_ref->{DATA};
+        ...
+	return $encrypted;
+    }
+
+    sub decrypt_asymmetrically() {
+        my $arg_ref = shift;
+
+        my $keyid = $arg_ref->{KEYID};
+        my $data  = $arg_ref->{DATA};
+        ...
+	return $decrypted;
+    }
+
+    sub store_tuple {
+        my $arg = shift;
+        ...
+        $dbh->do(q(DELETE FROM DATAPOOL WHERE (NAMESPACE=? AND KEY=?)), undef, $arg->{NAMESPACE}, $arg->{KEY});
+        my $sth = $dbh->prepare(
+	q(
+            INSERT INTO DATAPOOL (namespace, key, value)
+            VALUES (?, ?, ?)
+        ));
+        $sth->execute($arg->{NAMESPACE}, $arg->{KEY}, $arg->{VALUE});
+    }
+
+    sub retrieve_tuple {
+        my $arg = shift;
+        ...
+        my $sth = $dbh->prepare(
+        q(
+            SELECT VALUE FROM DATAPOOL WHERE (NAMESPACE=? AND KEY=?)
+        ));
+        $sth->execute($arg->{NAMESPACE}, $arg->{KEY});
+        my $row = $sth->fetch();
+        if (! defined $row) {
+            return;
+        }
+        return $row->[0];
+    }
+
+    # have one new symmetric key each day
+    my $tenc = 
+        OpenXPKI::Crypto::KeyManagement::TransparentEncryption->new({
+	    KEYMANAGEMENT => 'DAY',
+	});
+
+    # delegate required methods
+    $tenc->delegate({
+        GET_CURRENT_ASYMMETRIC_KEY_ID => \&get_last_cert_id,
+	ENCRYPT_ASYMMETRICALLY        => \&encrypt_asymmetrically,
+	DECRYPT_ASYMMETRICALLY        => \&decrypt_asymmetrically,
+	STORE_TUPLE                   => \&store_tuple,
+	RETRIEVE_TUPLE                => \&retrieve_tuple,
+	});
+
+    my $encrypted = $tenc->encrypt('foobar');
+    my $decrypted = $tenc->decrypt($encrypted);
 
 
 =head1 Internal methods
@@ -768,7 +1133,6 @@ instance.
 Allowed encodings: 'base64-oneline', 'base64', 'raw'
 
 See "Encoded data" below.
-
 
 =head2 decode()
 
@@ -812,10 +1176,10 @@ Decoding also supports <pem-data> for backward compatibility.
 
   <pem-data> ::= "-----BEGIN .*-----" <base64-chars> "-----END .*-----"
 
-  <key-id-short> ::= <base64-chars>
+  <key-id> ::= <base64-chars>
 
   <encoded-data> ::= <encoding> ";" <data> | 
-                   <key-id-short> ";" <encoding> ";" <data> | 
+                   <key-id> ";" <encoding> ";" <data> | 
                    <pem-data>
 
 
@@ -863,10 +1227,12 @@ The formal definition for a key identifier is as follows:
 
 =head2 Persisted keys
 
-Symmetric keys are persisted using the tuple store. In order to get a printable
-representation the key material is formatted as follows:
+Symmetric keys are persisted using the tuple store. 
 
 
 =head3 
 
+Encrypted data is encoded in a transport format that identifies the symmetric
+key that was used for encrypting the data. The symmetric key is identified
+by the Base64 encoding of its SHA1 hash.
 
