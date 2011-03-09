@@ -236,7 +236,7 @@ use Data::Dumper;
 	my $key        = $arg_ref->{KEY};
 	my $value      = $arg_ref->{VALUE};
 
-	$dummy_database{$ident}->{$namespace}->{$key}->{value} = $value;
+	$dummy_database{$ident}->{$namespace}->{$key} = $value;
 
 	### database: $dummy_database{$ident}
 	print Dumper $dummy_database{$ident};
@@ -260,11 +260,7 @@ use Data::Dumper;
 	    return;
 	}
 	
-	my $value = $dummy_database{$ident}->{$namespace}->{$key}->{value};
-
-	return {
-	    VALUE             => $value,
-	}
+	return $dummy_database{$ident}->{$namespace}->{$key};
     }
 
     sub serialize_encrypted_data {
@@ -333,6 +329,7 @@ use Data::Dumper;
 	my $arg_ref = shift;
 
 	my $key = $arg_ref->{KEY};
+
 	if (! defined $key || ($key eq '')) {
 	    confess('No key specified');
 	}
@@ -503,10 +500,7 @@ use Data::Dumper;
     # use of the existing one create a new key
     sub get_current_symmetric_key {
 	my $self = shift;
-	# use callback map if a callback exists
-	if (exists $callback_map{GET_CURRENT_SYMMETRIC_KEY_ID}) {
-	    return $callback_map{GET_CURRENT_SYMMETRIC_KEY_ID}(@_);
-	}
+
 	my $ident = ident $self;
 	my $arg_ref = shift;
 
@@ -576,11 +570,10 @@ use Data::Dumper;
 
 	} else {
 	    # symmetric key already exists, retrieve it
-	    my $keyid = $data->{VALUE};
-	    ### keyid: $keyid
+	    ### keyid: $data
 
 	    # obtain symmetric key from persistent storage
-	    $key = $self->retrieve_symmetric_key($keyid);
+	    $key = $self->retrieve_symmetric_key($data);
 	}
 
 	return $key;
@@ -675,9 +668,7 @@ use Data::Dumper;
 	    return;
 	}
 	
-	my $symmetric_key = $self->decrypt(
-	    $encrypted_symmetric_key->{VALUE}
-	    );
+	my $symmetric_key = $self->decrypt($encrypted_symmetric_key);
 
 	### symmetric key: $symmetric_key
 	

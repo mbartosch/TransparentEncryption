@@ -44,9 +44,7 @@ sub retrieve_tuple {
     if (! defined $row) {
 	return;
     }
-    return {
-	VALUE => $row->[0],
-    };
+    return $row->[0];
 }
 
 # list all basenames in directory t/certs/*.pem (only numerical ones)
@@ -218,7 +216,7 @@ $tmp = $tenc->retrieve_tuple(
 	KEY       => 'foo',
     });
 ok(defined $tmp, 'retrieve existing key');
-ok($tmp->{VALUE} eq 'bar', 'retrieving existing key data');
+ok($tmp eq 'bar', 'retrieving existing key data');
 
 # test serialization
 $tmp = $tenc->serialize_encrypted_data(
